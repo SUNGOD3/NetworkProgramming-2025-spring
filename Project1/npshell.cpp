@@ -232,19 +232,32 @@ int main() {
     setenv("PATH", "bin:.", 1);
     string s;
     int prev_pipe_read = STDIN_FILENO;
+    vector <string> tmp;
     while (1) {
-        cout << "% ";
-        getline(cin, s);
-        vector<string> commands;
-        istringstream iss(s);
-        string word;
-        while (iss >> word) {
-            commands.push_back(word);
+        vector <string> commands;
+        if(!tmp.empty()){
+            commands = tmp;
+            tmp.clear();
         }
+        else{
+            cout << "% ";
+            getline(cin, s);
+            istringstream iss(s);
+            string word;
+            while (iss >> word) {
+                commands.push_back(word);
+                if(is_pipe(word) > 0 || is_stderr_pipe(word) > 0) {
+                    while(iss >> word) {
+                        tmp.push_back(word);
+                    }
+                }
+            }
+        }
+        
         
         if (commands.empty()) continue;
         ++num_commands;
-        
+
         // Check if we need to output stored number pipe content
         if (number_pipe_outputs.count(num_commands)) {
             int pipe_fd[2];
