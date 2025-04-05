@@ -31,13 +31,13 @@ pid_t sleep_wait(pid_t pid){
 // type: 0="|", 1="|N", 2="!N", -1=not a pipe
 pair<int, int> parse_pipe(const string& s) {
     if (s == "|") return {0, 0};
-    int num=0;
+    int num = 0;
     if ((s[0] == '|' || s[0] == '!') && s.size() > 1) {
-        for (int i = 1; i < s.size(); i++) {
+        for (size_t i = 1; i < s.size(); i++) {
             if (s[i] < '0' || s[i] > '9') return {-1, -1};
             num = num * 10 + s[i] - '0';
         }
-        return {(s[0] == '|'?1:2), num};
+        return {(s[0] == '|'? 1:2), num};
     }
     return {-1, -1};
 }
@@ -48,7 +48,7 @@ void execute_direct_command(const vector<string>& args, int input_fd, int output
     string output_file;
     
     vector<string> exec_args = args;
-    for (int i = 0; i < exec_args.size(); ++i) {
+    for (size_t i = 0; i < exec_args.size(); ++i) {
         if (exec_args[i] == ">") {
             redirect_index = i;
             if (i + 1 < exec_args.size()) {
@@ -246,6 +246,7 @@ void process_commands(vector<string> commands) {
 }
 
 void sigchld_handler(int signo) {
+    (void)signo;
     while (waitpid(-1, NULL, WNOHANG) > 0);
 }
 
