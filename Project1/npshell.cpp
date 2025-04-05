@@ -7,35 +7,41 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <map>
-#include <list>
+#include <fstream>
+#include <pwd.h>
 using namespace std;
 
 int command_count = 0;
 multimap<int, int> numbered_pipe_fds; // Store file descriptors instead of content
+string home_dir(){
+    return getpwuid(getuid())->pw_dir;
+}
+
+pid_t sleep_wait(pid_t pid){
+    while ((pid = fork()) == -1) {
+        if (errno == EAGAIN) {
+            usleep(1000);
+        } else {
+            exit(1);
+        }
+    }
+    return pid;
+}
 
 // type: 0="|", 1="|N", 2="!N", -1=not a pipe
 pair<int, int> parse_pipe(const string& s) {
     if (s == "|") return {0, 0};
-    if (s[0] == '|' && s.size() > 1) {
-        int num = 0;
+    int num=0;
+    if ((s[0] == '|' || s[0] == '!') && s.size() > 1) {
         for (int i = 1; i < s.size(); i++) {
             if (s[i] < '0' || s[i] > '9') return {-1, -1};
             num = num * 10 + s[i] - '0';
         }
-        return {1, num};
-    }
-    if (s[0] == '!' && s.size() > 1) {
-        int num = 0;
-        for (int i = 1; i < s.size(); i++) {
-            if (s[i] < '0' || s[i] > '9') return {-1, -1};
-            num = num * 10 + s[i] - '0';
-        }
-        return {2, num};
+        return {(s[0] == '|'?1:2), num};
     }
     return {-1, -1};
 }
 
-// Handle direct execution of a command
 void execute_direct_command(const vector<string>& args, int input_fd, int output_fd, bool merge_stderr) {
     // Handle output redirection
     int redirect_index = -1;
@@ -48,13 +54,9 @@ void execute_direct_command(const vector<string>& args, int input_fd, int output
             if (i + 1 < exec_args.size()) {
                 output_file = exec_args[i + 1];
             }
+            exec_args.erase(exec_args.begin() + redirect_index, exec_args.end());
             break;
         }
-    }
-    
-    // Remove redirection markers
-    if (redirect_index != -1) {
-        exec_args.erase(exec_args.begin() + redirect_index, exec_args.end());
     }
     
     // Prepare exec parameters
@@ -83,7 +85,6 @@ void execute_direct_command(const vector<string>& args, int input_fd, int output
         dup2(output_fd, STDOUT_FILENO);
     }
     
-    // Handle stderr merging
     if (merge_stderr) {
         dup2(STDOUT_FILENO, STDERR_FILENO);
     }
@@ -100,7 +101,7 @@ void process_commands(vector<string> commands) {
     
     // Handle multiple input pipes
     vector<int> input_fds;
-    if (numbered_pipe_fds.count(command_count) > 0) {
+    if (numbered_pipe_fds.count(command_count)) {
         auto range = numbered_pipe_fds.equal_range(command_count);
         for (auto it = range.first; it != range.second; ++it) {
             input_fds.push_back(it->second);
@@ -110,10 +111,9 @@ void process_commands(vector<string> commands) {
     
     int input_fd = STDIN_FILENO;
     
-    // If there are multiple input pipes, need to merge them
+    // If there are multiple input pipes, merge them
     if (!input_fds.empty()) {
         if (input_fds.size() == 1) {
-            // If only one input pipe, use it directly
             input_fd = input_fds[0];
         } else {
             // If multiple input pipes, need to merge them
@@ -123,24 +123,16 @@ void process_commands(vector<string> commands) {
                 cerr << "Merge pipe creation failed\n";
                 return;
             }
-            
+            fcntl(merge_pipe[1], F_SETPIPE_SZ, 1048576);
             // For each input pipe, fork a process to read and write to the merge pipe
             for (int fd : input_fds) {
-                pid_t pid;
-                while ((pid = fork()) == -1) {
-                    if (errno == EAGAIN) {
-                        usleep(1000);
-                    } else {
-                        exit(1);
-                    }
-                }
+                pid_t pid = sleep_wait(pid);
                 if (pid == 0) {  // Child process
                     close(merge_pipe[0]);  // Close the read end of the merge pipe
                     
                     // Write the contents of the input pipe to the merge pipe
                     char buffer[4096];
-                    ssize_t n;
-                    while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
+                    for (ssize_t n; (n = read(fd, buffer, sizeof(buffer))) > 0;) {
                         write(merge_pipe[1], buffer, n);
                     }
                     
@@ -168,51 +160,36 @@ void process_commands(vector<string> commands) {
         }
     }
     
-    size_t i = 0;
-    while (i < commands.size()) {
-        // Get current command
+    for(size_t i = 0; i < commands.size();) {
         vector<string> current_cmd;
-        while (i < commands.size()) {
+        for (;i < commands.size(); ++i) {
             auto [pipe_type, pipe_num] = parse_pipe(commands[i]);
             if (pipe_type != -1) break;
             current_cmd.push_back(commands[i]);
-            i++;
         }
         
         // Check if there's a pipe
         if (i < commands.size()) {
-            auto [pipe_type, pipe_num] = parse_pipe(commands[i]);
-            i++; // Move past pipe symbol
+            auto [pipe_type, pipe_num] = parse_pipe(commands[i++]);
             
             if (pipe_type == 0) {  // Normal pipe
                 int pipe_fd[2];
                 if (pipe(pipe_fd) == -1) {
-                    cerr << "Pipe creation failed\n";
+                    cerr << "N Pipe creation failed\n";
                     return;
                 }
                 
                 // Use fork + dup2 for normal pipes
-                pid_t pid;
-                while ((pid = fork()) == -1) {
-                    if (errno == EAGAIN) {
-                        usleep(1000);
-                    } else {
-                        exit(1);
-                    }
-                }
+                pid_t pid = sleep_wait(pid);
                 if (pid == 0) {  // Child process
                     close(pipe_fd[0]);  // Close read end in child
                     execute_direct_command(current_cmd, input_fd, pipe_fd[1], false);
-                    // Should not reach here
-                    exit(1);
                 } else if (pid > 0) {  // Parent process
                     // Close write end, prepare read end for next command
                     close(pipe_fd[1]);
                     if (input_fd != STDIN_FILENO) close(input_fd);
                     input_fd = pipe_fd[0];
                     
-                    // We don't wait for the child process to finish
-                    // to allow pipeline to flow naturally
                 } else {
                     cerr << "Fork failed\n";
                     return;
@@ -227,22 +204,12 @@ void process_commands(vector<string> commands) {
                     cerr << "Numbered pipe creation failed\n";
                     return;
                 }
-                
-                pid_t pid;
-                while ((pid = fork()) == -1) {
-                    if (errno == EAGAIN) {
-                        usleep(1000);
-                    } else {
-                        exit(1);
-                    }
-                }
+                pid_t pid = sleep_wait(pid);
                 if (pid == 0) {  // Child process
                     close(numbered_pipe_fd[0]);  // Close read end in child
                     
                     // Execute command with stdout (and maybe stderr) to the pipe
                     execute_direct_command(current_cmd, input_fd, numbered_pipe_fd[1], merge_stderr);
-                    // Should not reach here
-                    exit(1);
                 } else if (pid > 0) {  // Parent process
                     // Close write end in parent
                     close(numbered_pipe_fd[1]);
@@ -253,7 +220,6 @@ void process_commands(vector<string> commands) {
                     if (input_fd != STDIN_FILENO) close(input_fd);
                     input_fd = STDIN_FILENO;
                     
-                    // We don't wait for the child to finish
                 } else {
                     cerr << "Fork failed\n";
                     return;
@@ -261,18 +227,9 @@ void process_commands(vector<string> commands) {
             }
         } else {
             // Last command, execute directly
-            pid_t pid;
-            while ((pid = fork()) == -1) {
-                if (errno == EAGAIN) {
-                    usleep(1000);
-                } else {
-                    exit(1);
-                }
-            }
+            pid_t pid = sleep_wait(pid);
             if (pid == 0) {  // Child process
                 execute_direct_command(current_cmd, input_fd, STDOUT_FILENO, false);
-                // Should not reach here
-                exit(1);
             } else if (pid > 0) {  // Parent process
                 if (input_fd != STDIN_FILENO) close(input_fd);
                 
@@ -286,21 +243,19 @@ void process_commands(vector<string> commands) {
         }
     }
     
-    // Clean up any remaining input file descriptors
-    if (input_fd != STDIN_FILENO) close(input_fd);
 }
 
-// Signal handler for zombie processes
 void sigchld_handler(int signo) {
-    // Reap all dead processes
     while (waitpid(-1, NULL, WNOHANG) > 0);
 }
 
 int main() {
     // Setup signal handler to prevent zombie processes
     signal(SIGCHLD, sigchld_handler);
-    
+
+    ofstream logfile(home_dir()+"/.npshell_history", ios::app);
     setenv("PATH", "bin:.", 1);
+    
     string input_line;
     vector<string> pending_commands;
     
@@ -313,9 +268,10 @@ int main() {
         } else {
             cout << "% ";
             getline(cin, input_line);
+            logfile << input_line << '\n';
+            logfile.flush();
             istringstream iss(input_line);
-            string word;
-            while (iss >> word) {
+            for (string word; iss >> word;) {
                 commands.push_back(word);
                 
                 // Check for numbered pipe, put subsequent commands in pending
@@ -333,10 +289,6 @@ int main() {
         command_count++;
         
         if (commands[0] == "exit") {
-            // Close all open file descriptors
-            for (const auto& [cmd, fd] : numbered_pipe_fds) {
-                close(fd);
-            }
             break;
         } else if (commands[0] == "setenv") {
             if (commands.size() >= 3) {
@@ -357,6 +309,6 @@ int main() {
             process_commands(commands);
         }
     }
-    
+    logfile.close();
     return 0;
 }
