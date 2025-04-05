@@ -2,8 +2,6 @@
 #include <vector>
 #include <string>
 #include <sstream>
-#include <cstdlib>
-#include <unistd.h>
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <map>
@@ -84,11 +82,9 @@ void execute_direct_command(const vector<string>& args, int input_fd, int output
     } else if (output_fd != STDOUT_FILENO) {
         dup2(output_fd, STDOUT_FILENO);
     }
-    
     if (merge_stderr) {
         dup2(STDOUT_FILENO, STDERR_FILENO);
     }
-    
     // Execute command
     execvp(c_args[0], c_args.data());
     cerr << "Unknown command: [" << c_args[0] << "].\n";
@@ -116,7 +112,7 @@ void process_commands(vector<string> commands) {
         if (input_fds.size() == 1) {
             input_fd = input_fds[0];
         } else {
-            // If multiple input pipes, need to merge them
+            // Multiple input pipes
             // Create a temporary pipe for merging multiple inputs
             int merge_pipe[2];
             if (pipe(merge_pipe) == -1) {
